@@ -39,7 +39,7 @@ def build_loss_compute(model, tgt_field, opt, train=True):
         criterion = LabelSmoothingLoss(
             opt.label_smoothing, len(tgt_field.vocab), ignore_index=padding_idx
         )
-    elif isinstance(model.generator[-1], LogSparsemax):
+    elif isinstance(model.generator[-1], LogSparsemax): #TODO: check if this is right. in the old version, it was model.generator[1]
         criterion = SparsemaxLoss(ignore_index=padding_idx, reduction='sum')
     else:
         criterion = nn.NLLLoss(ignore_index=padding_idx, reduction='sum')
@@ -58,7 +58,7 @@ def build_loss_compute(model, tgt_field, opt, train=True):
     else:
         compute = NMTLossCompute(
             criterion, loss_gen, lambda_coverage=opt.lambda_coverage,
-            lambda_align=opt.lambda_align)
+            lambda_align=opt.lambda_align, tgt_vocab=tgt_field.vocab, tgt_eos_word=tgt_field.eos_token)
     compute.to(device)
 
     return compute
@@ -83,10 +83,14 @@ class LossComputeBase(nn.Module):
         normalzation (str): normalize by "sents" or "tokens"
     """
 
-    def __init__(self, criterion, generator):
+    def __init__(self, criterion, generator, tgt_vocab):
         super(LossComputeBase, self).__init__()
         self.criterion = criterion
         self.generator = generator
+        # MMM
+        self.tgt_vocab = tgt_vocab
+        self.tgt_vocab_size = len(tgt_vocab.itos)
+        # /MMM
 
     @property
     def padding_idx(self):
@@ -159,13 +163,25 @@ class LossComputeBase(nn.Module):
         trunc_range = (trunc_start, trunc_start + trunc_size)
         shard_state = self._make_shard_state(batch, output, trunc_range, attns)
         if shard_size == 0:
+            # MMM
+            self.generator[-1].validation = True
+            # /MMM
             loss, stats = self._compute_loss(batch, **shard_state)
+            # MMM
+            self.generator[-1].validation = False
+            # /MMM
             return loss / float(normalization), stats
         batch_stats = onmt.utils.Statistics()
         for shard in shards(shard_state, shard_size):
+            # MMM
+            self.generator[-1].validation = True
+            # /MMM
             loss, stats = self._compute_loss(batch, **shard)
             loss.div(float(normalization)).backward()
             batch_stats.update(stats)
+            # MMM
+            self.generator[-1].validation = False
+            # /MMM
         return None, batch_stats
 
     def _stats(self, loss, scores, target):
@@ -226,9 +242,9 @@ class NMTLossCompute(LossComputeBase):
     Standard NMT Loss Computation.
     """
 
-    def __init__(self, criterion, generator, normalization="sents",
+    def __init__(self, criterion, generator, tgt_vocab, tgt_eos_word, normalization="sents",
                  lambda_coverage=0.0, lambda_align=0.0):
-        super(NMTLossCompute, self).__init__(criterion, generator)
+        super(NMTLossCompute, self).__init__(criterion, generator, tgt_vocab, tgt_eos_word)
         self.lambda_coverage = lambda_coverage
         self.lambda_align = lambda_align
 
@@ -280,6 +296,13 @@ class NMTLossCompute(LossComputeBase):
 
         bottled_output = self._bottle(output)
 
+        # MMM
+        # use -1 to omit </s>
+        self.generator[-1].t_lens = (target != self.padding_idx).sum(dim=0) - 1
+        self.generator[-1].eos_ind = self.tgt_vocab.stoi[self.tgt_eos_word]
+        self.generator[-1].batch_max_len = target.size(0)
+        self.generator[-1].tgt_vocab_size = self.tgt_vocab_size
+        # /MMM
         scores = self.generator(bottled_output)
         gtruth = target.view(-1)
 

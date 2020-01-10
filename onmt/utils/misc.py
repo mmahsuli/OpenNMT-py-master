@@ -83,6 +83,14 @@ def use_gpu(opt):
         (hasattr(opt, 'gpu') and opt.gpu > -1)
 
 
+# MMM
+def use_length_model(opt):
+    """
+    Creates a boolean if length model used
+    """
+    return hasattr(opt, 'length_model') and len(opt.length_model) > 0
+# /MMM
+
 def set_random_seed(seed, is_cuda):
     """Sets the random seed."""
     if seed > 0:

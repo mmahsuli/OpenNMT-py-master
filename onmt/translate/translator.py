@@ -18,6 +18,10 @@ from onmt.utils.misc import tile, set_random_seed, report_matrix
 from onmt.utils.alignment import extract_alignment, build_align_pharaoh
 from onmt.modules.copy_generator import collapse_copy_scores
 
+# MMM
+import onmt.utils.length_model as length_model
+from random import randint
+# /MMM
 
 def build_translator(opt, report_score=True, logger=None, out_file=None):
     if out_file is None:
@@ -107,6 +111,13 @@ class Translator(object):
             fields,
             src_reader,
             tgt_reader,
+            # MMM
+            length_model,
+            length_penalty_a,
+            length_penalty_b,
+            length_model_loc,
+            output,
+            # /MMM
             gpu=-1,
             n_best=1,
             min_length=0,
@@ -145,6 +156,26 @@ class Translator(object):
         self._use_cuda = gpu > -1
         self._dev = torch.device("cuda", self._gpu) \
             if self._use_cuda else torch.device("cpu")
+
+        # MMM
+        self.length_model = length_model
+        self.length_penalty_a = length_penalty_a
+        self.length_penalty_b = length_penalty_b
+
+        if self.length_model == 'lstm':
+            self.device = 'cuda' if self._use_cuda else 'cpu'
+            length_model_loc = length_model_loc
+            output_loc = output
+            checkpoint = torch.load(length_model_loc)
+            length_model_opt = checkpoint['opt']
+            EMBEDDING_DIM = length_model_opt.embedding_dim
+            HIDDEN_DIM = length_model_opt.hidden_dim
+            src_vocab = dict(self.fields)["src"].base_field.vocab
+            # Construct the model:
+            self.l_model = onmt.utils.length_model.LSTMTagger(EMBEDDING_DIM, HIDDEN_DIM, src_vocab, self.device).to(self.device)
+            self.l_model.load_state_dict(checkpoint['model_state_dict'])
+            self.l_model.eval()
+        # /MMM
 
         self.n_best = n_best
         self.max_length = max_length
@@ -259,6 +290,13 @@ class Translator(object):
             report_align=report_align,
             report_score=report_score,
             logger=logger,
+            # MMM
+            length_model=opt.length_model,
+            length_penalty_a=opt.length_penalty_a,
+            length_penalty_b=opt.length_penalty_b,
+            length_model_loc=opt.length_model_loc,
+            output=opt.output,
+            # /MMM
             seed=opt.seed)
 
     def _log(self, msg):
@@ -585,6 +623,63 @@ class Translator(object):
             decoder_in, memory_bank, memory_lengths=memory_lengths, step=step
         )
 
+        # MMM
+        if len(self.length_model) > 0:
+            # print('Using target length model.')
+            if self.length_model == 'oracle':
+                # print('Length model: oracle')
+                pad = self._tgt_pad_idx
+                eos = self._tgt_eos_idx
+                #sequence has <s> and </s>
+                t_lens = (batch.tgt != pad).sum(dim=0)
+                # # add noise to t_lens for experiments (just for test)
+                # noisy_t_lens = torch.tensor([l+randint(-2,2) for l in t_lens])
+                # if self.cuda:
+                #     noisy_t_lens = noisy_t_lens.to('cuda')
+                # self.model.generator[-1].t_lens = noisy_t_lens
+                self.model.generator[-1].t_lens = t_lens
+                self.model.generator[-1].eos_ind = eos
+                self.model.generator[-1].batch_max_len = batch.tgt.size(0)
+            elif self.length_model == 'fixed_ratio':
+                # print('Length model: fixed_ratio')
+                pad = self._tgt_pad_idx
+                eos = self._tgt_eos_idx
+                #sequence has <s> and </s>
+                t_lens = torch.ceil(batch.src[1].float().cuda()*1.0699071772279642)
+                # # add noise to t_lens for experiments (just for test)
+                # noisy_t_lens = torch.tensor([l+randint(-2,2) for l in t_lens])
+                # if self.cuda:
+                #     noisy_t_lens = noisy_t_lens.to('cuda')
+                # self.model.generator[-1].t_lens = noisy_t_lens
+                self.model.generator[-1].t_lens = t_lens
+                self.model.generator[-1].eos_ind = eos
+                self.model.generator[-1].batch_max_len = batch.tgt.size(0)
+            elif self.length_model == 'lstm':
+                # print('Length model: lstm')
+                pad = self._tgt_pad_idx
+                eos = self._tgt_eos_idx
+                #sequence has <s> and </s>
+                #TODO: the code itself must handle ratio and diff lstm length models
+                t_lens = []
+                src_vocab = dict(self.fields)["src"].base_field.vocab
+                ratios = onmt.utils.length_model.predict_length_ratio(self.l_model, self.device,
+                                                                      batch.src[0].squeeze().transpose(0, 1), src_vocab)
+                # diffs = torch.round(onmt.utils.length_model.predict_length_ratio(self.l_model, self.device,
+                #                                                       batch.src[0].squeeze().transpose(0, 1), src_vocab)
+                # target sequence has <s> and </s>, but source sequence doesn't have them
+                t_lens = ratios * batch.src[1].type(torch.FloatTensor).to(self.device) + 2
+                # t_lens = torch.max((diffs + batch.src[1].type(torch.FloatTensor).to(self.device)), torch.zeros(batch.tgt.size(1)).to(self.device)) + 2
+
+                # # add noise to t_lens for experiments (just for test)
+                # noisy_t_lens = torch.tensor([l+randint(-2,2) for l in t_lens])
+                # if self.cuda:
+                #     noisy_t_lens = noisy_t_lens.to('cuda')
+                # self.model.generator[-1].t_lens = noisy_t_lens
+                self.model.generator[-1].t_lens = t_lens
+                self.model.generator[-1].eos_ind = eos
+                self.model.generator[-1].batch_max_len = batch.tgt.size(0)
+        # /MMM
+
         # Generator forward.
         if not self.copy_attn:
             if "std" in dec_attn:
@@ -662,6 +757,12 @@ class Translator(object):
 
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
+            if step == 26:
+                print('gotta!')
+            # MMM
+            if self.length_model == 'oracle' or self.length_model == 'fixed_ratio' or self.length_model == 'lstm':
+                self.model.generator[-1].word_index = step
+            # /MMM
             decoder_input = decode_strategy.current_predictions.view(1, -1, 1)
 
             log_probs, attn = self._decode_and_generate(

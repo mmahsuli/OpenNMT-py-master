@@ -57,7 +57,7 @@ def main():
             model_opt.__dict__[arg] = dummy_opt.__dict__[arg]
 
     model = onmt.model_builder.build_base_model(
-        model_opt, fields, use_gpu(opt), checkpoint)
+        model_opt, fields, use_gpu(opt), opt.length_model, checkpoint)
     encoder = model.encoder
     decoder = model.decoder
 
