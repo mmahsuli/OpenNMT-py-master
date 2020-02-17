@@ -631,13 +631,15 @@ class Translator(object):
                 pad = self._tgt_pad_idx
                 eos = self._tgt_eos_idx
                 #sequence has <s> and </s>
-                t_lens = (batch.tgt != pad).sum(dim=0)
+                t_lens = (batch.tgt != pad).sum(dim=0).squeeze(1)
                 # # add noise to t_lens for experiments (just for test)
                 # noisy_t_lens = torch.tensor([l+randint(-2,2) for l in t_lens])
                 # if self.cuda:
                 #     noisy_t_lens = noisy_t_lens.to('cuda')
                 # self.model.generator[-1].t_lens = noisy_t_lens
-                self.model.generator[-1].t_lens = t_lens
+                self.device = 'cuda' if self._use_cuda else 'cpu'
+                self.model.generator[-1].t_lens = \
+                    t_lens if batch_offset is None else t_lens.index_select(0, batch_offset.to(self.device))
                 self.model.generator[-1].eos_ind = eos
                 self.model.generator[-1].batch_max_len = batch.tgt.size(0)
             elif self.length_model == 'fixed_ratio':
@@ -651,7 +653,8 @@ class Translator(object):
                 # if self.cuda:
                 #     noisy_t_lens = noisy_t_lens.to('cuda')
                 # self.model.generator[-1].t_lens = noisy_t_lens
-                self.model.generator[-1].t_lens = t_lens
+                self.model.generator[-1].t_lens = \
+                    t_lens if batch_offset is None else t_lens.index_select(0, batch_offset.to(self.device))
                 self.model.generator[-1].eos_ind = eos
                 self.model.generator[-1].batch_max_len = batch.tgt.size(0)
             elif self.length_model == 'lstm':
@@ -665,7 +668,7 @@ class Translator(object):
                 ratios = onmt.utils.length_model.predict_length_ratio(self.l_model, self.device,
                                                                       batch.src[0].squeeze().transpose(0, 1), src_vocab)
                 # diffs = torch.round(onmt.utils.length_model.predict_length_ratio(self.l_model, self.device,
-                #                                                       batch.src[0].squeeze().transpose(0, 1), src_vocab)
+                #                                                       batch.src[0].squeeze().transpose(0, 1), src_vocab))
                 # target sequence has <s> and </s>, but source sequence doesn't have them
                 t_lens = ratios * batch.src[1].type(torch.FloatTensor).to(self.device) + 2
                 # t_lens = torch.max((diffs + batch.src[1].type(torch.FloatTensor).to(self.device)), torch.zeros(batch.tgt.size(1)).to(self.device)) + 2
@@ -675,7 +678,8 @@ class Translator(object):
                 # if self.cuda:
                 #     noisy_t_lens = noisy_t_lens.to('cuda')
                 # self.model.generator[-1].t_lens = noisy_t_lens
-                self.model.generator[-1].t_lens = t_lens
+                self.model.generator[-1].t_lens =\
+                    t_lens if batch_offset is None else t_lens.index_select(0, batch_offset.to(self.device))
                 self.model.generator[-1].eos_ind = eos
                 self.model.generator[-1].batch_max_len = batch.tgt.size(0)
         # /MMM
@@ -757,8 +761,6 @@ class Translator(object):
 
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
-            if step == 26:
-                print('gotta!')
             # MMM
             if self.length_model == 'oracle' or self.length_model == 'fixed_ratio' or self.length_model == 'lstm':
                 self.model.generator[-1].word_index = step
